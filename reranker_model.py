@@ -7,7 +7,6 @@ from transformers import AutoTokenizer, AutoModel
 import os
 import gc
 import logging
-
 logger = logging.getLogger("reranker_model")
 
 # Determine the best available device with proper support
@@ -22,25 +21,24 @@ def get_device():
 # Base class for token weighting strategies
 class TokenWeighter(nn.Module):
 	"""Base class for token weighting strategies"""
-
-	def __init__(self):
+	def __init__(self, weighting_mode="full"):
 		super(TokenWeighter, self).__init__()
+		self.weighting_mode = weighting_mode # "full", "query_only", or "none"
 
-	def forward(self, tokens, token_indices, **kwargs):
+	def forward(self, tokens, token_indices, is_query=False, **kwargs):
 		"""
 		Calculate weights for tokens
-
 		Args:
 			tokens: List of token strings
 			token_indices: Indices of tokens in the sequence
+			is_query: Whether these tokens are from a query or document
 			**kwargs: Additional inputs needed for specific weighting strategies
-
 		Returns:
 			Tensor of weights for each token
 		"""
 		raise NotImplementedError("Subclasses must implement this method")
 
-	def batch_forward(self, batch_tokens, batch_token_indices, **kwargs):
+	def batch_forward(self, batch_tokens, batch_token_indices, batch_is_query=None, **kwargs):
 		"""
 		Calculate weights for batches of tokens - default implementation processes each item separately
 		Override this for more efficient batch implementations
@@ -48,9 +46,13 @@ class TokenWeighter(nn.Module):
 		results = []
 		batch_size = len(batch_tokens)
 
+		if batch_is_query is None:
+			batch_is_query = [False] * batch_size
+
 		for i in range(batch_size):
 			tokens = batch_tokens[i]
 			token_indices = batch_token_indices[i]
+			is_query = batch_is_query[i]
 
 			# Extract batch-specific kwargs
 			item_kwargs = {}
@@ -60,20 +62,19 @@ class TokenWeighter(nn.Module):
 				else:
 					item_kwargs[key] = value
 
-			weights = self.forward(tokens, token_indices, **item_kwargs)
+			weights = self.forward(tokens, token_indices, is_query=is_query, **item_kwargs)
 			results.append(weights)
 
 		return results
 
 class VocabLookupWeighter(TokenWeighter):
 	"""Learns a weight for each token in the vocabulary"""
-
-	def __init__(self, vocab_size, init_value=1.0):
-		super(VocabLookupWeighter, self).__init__()
+	def __init__(self, vocab_size, init_value=1.0, weighting_mode="full"):
+		super(VocabLookupWeighter, self).__init__(weighting_mode=weighting_mode)
 		self.token_weights = nn.Parameter(torch.ones(vocab_size) * init_value)
 
-	def forward(self, tokens, token_indices, **kwargs):
-		"""Get weights by vocabulary lookup"""
+	def forward(self, tokens, token_indices, is_query=False, **kwargs):
+		"""Get weights based on weighting mode and token context"""
 		token_ids = kwargs.get('token_ids')
 		if token_ids is None:
 			return torch.ones(len(tokens), device=self.token_weights.device)
@@ -83,19 +84,32 @@ class VocabLookupWeighter(TokenWeighter):
 		indices = torch.tensor(token_ids, dtype=torch.long, device=device)
 		weights = torch.index_select(self.token_weights, 0, indices)
 
+		# Apply weighting based on mode
+		if self.weighting_mode == "none":
+			# Return uniform weights (still keep gradients flowing)
+			return torch.ones_like(weights)
+		elif self.weighting_mode == "query_only" and not is_query:
+			# For document tokens in query_only mode, return uniform weights
+			return torch.ones_like(weights)
+
+		# Otherwise return actual weights
 		return weights
 
-	def batch_forward(self, batch_tokens, batch_token_indices, **kwargs):
+	def batch_forward(self, batch_tokens, batch_token_indices, batch_is_query=None, **kwargs):
 		"""Efficient batch implementation for vocab lookup"""
 		batch_token_ids = kwargs.get('batch_token_ids')
+
 		if batch_token_ids is None:
 			# Fall back to sequential processing
-			return super().batch_forward(batch_tokens, batch_token_indices, **kwargs)
+			return super().batch_forward(batch_tokens, batch_token_indices, batch_is_query, **kwargs)
 
 		device = self.token_weights.device
 		batch_weights = []
 
-		for token_ids in batch_token_ids:
+		if batch_is_query is None:
+			batch_is_query = [False] * len(batch_tokens)
+
+		for i, token_ids in enumerate(batch_token_ids):
 			if not token_ids:
 				# Handle empty token_ids case
 				batch_weights.append(torch.ones(0, device=device))
@@ -103,72 +117,94 @@ class VocabLookupWeighter(TokenWeighter):
 
 			indices = torch.tensor(token_ids, dtype=torch.long, device=device)
 			weights = torch.index_select(self.token_weights, 0, indices)
+
+			# Apply weighting based on mode
+			if self.weighting_mode == "none":
+				weights = torch.ones_like(weights)
+			elif self.weighting_mode == "query_only" and not batch_is_query[i]:
+				weights = torch.ones_like(weights)
+
 			batch_weights.append(weights)
 
 		return batch_weights
 
 class PositionalWeighter(TokenWeighter):
 	"""Weights tokens based on their position in the sequence"""
-
-	def __init__(self, max_length=512, init_slope=0.01, init_bias=0.5):
-		super(PositionalWeighter, self).__init__()
+	def __init__(self, max_length=512, init_slope=0.01, init_bias=0.5, weighting_mode="full"):
+		super(PositionalWeighter, self).__init__(weighting_mode=weighting_mode)
 		self.slope = nn.Parameter(torch.tensor(init_slope, dtype=torch.float32))
 		self.bias = nn.Parameter(torch.tensor(init_bias, dtype=torch.float32))
 		self.max_length = max_length
 
-	def forward(self, tokens, token_indices, **kwargs):
-		"""Calculate weights based on position"""
+	def forward(self, tokens, token_indices, is_query=False, **kwargs):
+		"""Calculate weights based on position and weighting mode"""
 		device = self.slope.device
 
-		# Normalize positions to [0, 1]
+		# Handle weighting modes first
+		if self.weighting_mode == "none":
+			return torch.ones(len(tokens), device=device)
+		elif self.weighting_mode == "query_only" and not is_query:
+			return torch.ones(len(tokens), device=device)
+
+		# Calculate positional weights
 		positions = torch.tensor(token_indices, dtype=torch.float32, device=device) / self.max_length
-
-		# Linear transformation: slope * position + bias
 		weights = self.slope * positions + self.bias
-
-		# Ensure weights are positive
-		weights = F.softplus(weights)
+		weights = F.softplus(weights)  # Ensure weights are positive
 
 		return weights
 
-	def batch_forward(self, batch_tokens, batch_token_indices, **kwargs):
+	def batch_forward(self, batch_tokens, batch_token_indices, batch_is_query=None, **kwargs):
 		"""Efficient batch implementation for positional weighting"""
 		device = self.slope.device
 		batch_weights = []
 
-		for token_indices in batch_token_indices:
+		if batch_is_query is None:
+			batch_is_query = [False] * len(batch_tokens)
+
+		for i, token_indices in enumerate(batch_token_indices):
 			if not token_indices:
 				# Handle empty token_indices case
 				batch_weights.append(torch.ones(0, device=device))
 				continue
 
-			# Normalize positions to [0, 1]
+			# Handle weighting modes first
+			if self.weighting_mode == "none":
+				batch_weights.append(torch.ones(len(token_indices), device=device))
+				continue
+			elif self.weighting_mode == "query_only" and not batch_is_query[i]:
+				batch_weights.append(torch.ones(len(token_indices), device=device))
+				continue
+
+			# Calculate positional weights
 			positions = torch.tensor(token_indices, dtype=torch.float32, device=device) / self.max_length
-
-			# Linear transformation: slope * position + bias
 			weights = self.slope * positions + self.bias
-
-			# Ensure weights are positive
 			weights = F.softplus(weights)
+
 			batch_weights.append(weights)
 
 		return batch_weights
 
 class SurpriseWeighter(TokenWeighter):
 	"""Weights tokens based on their surprise (-log probability)"""
-
-	def __init__(self, init_weight=1.0, init_bias=0.0):
-		super(SurpriseWeighter, self).__init__()
+	def __init__(self, init_weight=1.0, init_bias=0.0, weighting_mode="full"):
+		super(SurpriseWeighter, self).__init__(weighting_mode=weighting_mode)
 		self.weight = nn.Parameter(torch.tensor(init_weight, dtype=torch.float32))
 		self.bias = nn.Parameter(torch.tensor(init_bias, dtype=torch.float32))
 
-	def forward(self, tokens, token_indices, **kwargs):
-		"""Calculate weights based on token probabilities"""
+	def forward(self, tokens, token_indices, is_query=False, **kwargs):
+		"""Calculate weights based on token probabilities and weighting mode"""
+		device = self.weight.device
+
+		# Handle weighting modes first
+		if self.weighting_mode == "none":
+			return torch.ones(len(tokens), device=device)
+		elif self.weighting_mode == "query_only" and not is_query:
+			return torch.ones(len(tokens), device=device)
+
+		# Calculate surprise-based weights
 		token_probs = kwargs.get('token_probs')
 		if token_probs is None or all(p is None for p in token_probs):
-			return torch.ones(len(tokens), device=self.weight.device)
-
-		device = self.weight.device
+			return torch.ones(len(tokens), device=device)
 
 		# Replace None values with a default probability
 		cleaned_probs = [0.01 if p is None else p for p in token_probs]
@@ -189,17 +225,29 @@ class SurpriseWeighter(TokenWeighter):
 
 		return weights
 
-	def batch_forward(self, batch_tokens, batch_token_indices, **kwargs):
+	def batch_forward(self, batch_tokens, batch_token_indices, batch_is_query=None, **kwargs):
 		"""Efficient batch implementation for surprise weighting"""
 		batch_token_probs = kwargs.get('batch_token_probs')
+
 		if batch_token_probs is None:
 			# Fall back to sequential processing
-			return super().batch_forward(batch_tokens, batch_token_indices, **kwargs)
+			return super().batch_forward(batch_tokens, batch_token_indices, batch_is_query, **kwargs)
 
 		device = self.weight.device
 		batch_weights = []
 
-		for token_probs in batch_token_probs:
+		if batch_is_query is None:
+			batch_is_query = [False] * len(batch_tokens)
+
+		for i, token_probs in enumerate(batch_token_probs):
+			# Handle weighting modes first
+			if self.weighting_mode == "none":
+				batch_weights.append(torch.ones(len(token_probs) if token_probs else 0, device=device))
+				continue
+			elif self.weighting_mode == "query_only" and not batch_is_query[i]:
+				batch_weights.append(torch.ones(len(token_probs) if token_probs else 0, device=device))
+				continue
+
 			if not token_probs or all(p is None for p in token_probs):
 				# Handle empty or all-None case
 				batch_weights.append(torch.ones(len(token_probs) if token_probs else 0, device=device))
@@ -221,37 +269,42 @@ class SurpriseWeighter(TokenWeighter):
 
 			# Ensure weights are positive
 			weights = F.softplus(weights)
+
 			batch_weights.append(weights)
 
 		return batch_weights
 
 class CombinedWeighter(TokenWeighter):
 	"""Combines multiple weighting strategies"""
-
-	def __init__(self, weighters, weights=None):
+	def __init__(self, weighters, weights=None, weighting_mode="full"):
 		"""
 		Initialize combined weighter
-
 		Args:
 			weighters: List of TokenWeighter instances
 			weights: Optional weights for each weighter (will be learned if not provided)
+			weighting_mode: Weighting mode to use
 		"""
-		super(CombinedWeighter, self).__init__()
+		super(CombinedWeighter, self).__init__(weighting_mode=weighting_mode)
 		self.weighters = nn.ModuleList(weighters)
-
 		if weights is None:
 			self.strategy_weights = nn.Parameter(torch.ones(len(weighters), dtype=torch.float32))
 		else:
 			self.strategy_weights = nn.Parameter(torch.tensor(weights, dtype=torch.float32))
 
-	def forward(self, tokens, token_indices, **kwargs):
+	def forward(self, tokens, token_indices, is_query=False, **kwargs):
 		"""Combine weights from multiple strategies"""
 		device = self.strategy_weights.device
+
+		# Handle weighting modes
+		if self.weighting_mode == "none":
+			return torch.ones(len(tokens), device=device)
+		elif self.weighting_mode == "query_only" and not is_query:
+			return torch.ones(len(tokens), device=device)
 
 		# Calculate weights from each strategy
 		all_weights = []
 		for weighter in self.weighters:
-			weights = weighter(tokens, token_indices, **kwargs)
+			weights = weighter(tokens, token_indices, is_query=is_query, **kwargs)
 			all_weights.append(weights)
 
 		# Stack weights and apply strategy weighting
@@ -263,15 +316,23 @@ class CombinedWeighter(TokenWeighter):
 
 		return combined
 
-	def batch_forward(self, batch_tokens, batch_token_indices, **kwargs):
+	def batch_forward(self, batch_tokens, batch_token_indices, batch_is_query=None, **kwargs):
 		"""Efficient batch implementation for combined weighting"""
 		device = self.strategy_weights.device
 		batch_size = len(batch_tokens)
 
+		if batch_is_query is None:
+			batch_is_query = [False] * batch_size
+
 		# Get batch weights from each weighter
 		all_weighter_results = []
 		for weighter in self.weighters:
-			batch_weights = weighter.batch_forward(batch_tokens, batch_token_indices, **kwargs)
+			batch_weights = weighter.batch_forward(
+				batch_tokens, 
+				batch_token_indices, 
+				batch_is_query=batch_is_query, 
+				**kwargs
+			)
 			all_weighter_results.append(batch_weights)
 
 		# Compute strategy weights
@@ -280,6 +341,14 @@ class CombinedWeighter(TokenWeighter):
 		# Combine weights for each item in batch
 		combined_batch_weights = []
 		for i in range(batch_size):
+			# Handle weighting modes
+			if self.weighting_mode == "none":
+				combined_batch_weights.append(torch.ones_like(all_weighter_results[0][i]))
+				continue
+			elif self.weighting_mode == "query_only" and not batch_is_query[i]:
+				combined_batch_weights.append(torch.ones_like(all_weighter_results[0][i]))
+				continue
+
 			# Get weights from all strategies for this batch item
 			item_weights = []
 			for strategy_idx, strategy_result in enumerate(all_weighter_results):
@@ -311,7 +380,8 @@ class LlamaReranker(nn.Module):
 		normalize_embeddings: bool = True,
 		token_weighter: Optional[TokenWeighter] = None,
 		similarity_fn: str = "cosine",
-		weight_normalization: str = "linear"
+		weight_normalization: str = "linear",
+		weighting_mode="full"
 	):
 		"""Initialize the Llama Reranker model"""
 		super(LlamaReranker, self).__init__()
@@ -321,6 +391,7 @@ class LlamaReranker(nn.Module):
 		self.layer_idx = layer_idx
 		self.max_length = max_length
 		self.normalize_embeddings = normalize_embeddings
+		self.weighting_mode = weighting_mode
 
 		# Device setup
 		if device is None:
@@ -612,7 +683,8 @@ class LlamaReranker(nn.Module):
 				query_tokens, 
 				query_token_indices,
 				token_ids=query_token_ids,
-				token_probs=query_token_probs
+				token_probs=query_token_probs,
+				is_query=True
 			)
 
 			# Get weights for corresponding document tokens
@@ -625,15 +697,21 @@ class LlamaReranker(nn.Module):
 			best_doc_token_probs = [doc_token_probs[idx.item()] if idx.item() < len(doc_token_probs) else None 
 								  for idx in max_indices]
 
-			doc_weights = self.token_weighter(
+			best_doc_weights = self.token_weighter(
 				best_doc_tokens,
 				best_doc_indices,
 				token_ids=best_doc_token_ids,
-				token_probs=best_doc_token_probs
+				token_probs=best_doc_token_probs,
+				is_query=False
 			)
 
-			# Combine query and document weights
-			combined_weights = query_weights * doc_weights
+			# Apply weighting scheme based on mode
+			if self.weighting_mode == "query_only":
+				combined_weights = query_weights
+			elif self.weighting_mode == "none":
+				combined_weights = torch.ones_like(query_weights) / len(query_weights)
+			else:  # "full"
+				combined_weights = query_weights * best_doc_weights
 
 			# Apply weight normalization
 			if self.weight_normalization == "linear":

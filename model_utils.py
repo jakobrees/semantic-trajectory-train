@@ -55,7 +55,8 @@ def save_checkpoint(
 			"layer_type": "single",
 			"normalize_embeddings": model.normalize_embeddings,
 			"similarity_fn": model.similarity_fn,
-			"weight_normalization": model.weight_normalization
+			"weight_normalization": model.weight_normalization,
+			"weighting_mode": model.weighting_mode
 		}
 
 		# Add loss if available

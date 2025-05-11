@@ -22,7 +22,8 @@ class MultiLayerReranker(nn.Module):
 		max_length: int = 512,
 		normalize_embeddings: bool = True,
 		similarity_fn: str = "cosine",
-		weight_normalization: str = "linear"
+		weight_normalization: str = "linear",  # Changed default to linear
+		weighting_mode="full"
 	):
 		super(MultiLayerReranker, self).__init__()
 		# Model configuration
@@ -33,6 +34,7 @@ class MultiLayerReranker(nn.Module):
 		self.normalize_embeddings = normalize_embeddings
 		self.similarity_fn = similarity_fn
 		self.weight_normalization = weight_normalization
+		self.weighting_mode = weighting_mode
 
 		# Logger setup
 		self.logger = logging.getLogger("multi_layer_reranker")
@@ -105,9 +107,15 @@ class MultiLayerReranker(nn.Module):
 			self.logger.info(f"Initializing weighters with vocab size: {vocab_size}")
 			# Initialize layer weighters
 			for layer_idx in self.layer_indices:
-				self.layer_weighters[f"layer_{layer_idx}"] = VocabLookupWeighter(vocab_size)
+				self.layer_weighters[f"layer_{layer_idx}"] = VocabLookupWeighter(
+					vocab_size, 
+					weighting_mode=self.weighting_mode
+				)
 			# Initialize DTW weighter
-			self.dtw_weighter = VocabLookupWeighter(vocab_size)
+			self.dtw_weighter = VocabLookupWeighter(
+				vocab_size, 
+				weighting_mode=self.weighting_mode
+			)
 			# Move to device
 			self.to(self.device)
 
@@ -115,7 +123,7 @@ class MultiLayerReranker(nn.Module):
 		self.dtw_calculator.to(self.device)
 
 		self._is_loaded = True
-		self.logger.info("Model loaded successfully")
+		self.logger.info(f"Model loaded successfully with weight_normalization={self.weight_normalization}, weighting_mode={self.weighting_mode}")
 
 	def unload_model(self):
 		"""Unload model and tokenizer from memory"""
@@ -137,7 +145,7 @@ class MultiLayerReranker(nn.Module):
 		gc.collect()
 		self.logger.info("Model unloaded successfully.")
 
-	def encode_multi_layer(self, texts, remove_special_tokens=True):
+	def encode_multi_layer(self, texts, remove_special_tokens=True, is_query=False):
 		"""
 		Encode texts and extract embeddings from all specified layers in one forward pass.
 		Optimized for batch processing.
@@ -145,6 +153,7 @@ class MultiLayerReranker(nn.Module):
 		Args:
 			texts: Single text or list of texts to encode
 			remove_special_tokens: Whether to remove special tokens from outputs
+			is_query: Whether the texts are queries (True) or documents (False)
 
 		Returns:
 			Dict with layer_data containing embeddings and token info for each layer
@@ -240,7 +249,8 @@ class MultiLayerReranker(nn.Module):
 					"embeddings": filtered_embeddings,
 					"tokens": filtered_tokens,
 					"token_ids": filtered_token_ids,
-					"token_indices": filtered_token_indices
+					"token_indices": filtered_token_indices,
+					"is_query": is_query  # Store query/document flag
 				}
 
 			# Extract token trajectories for DTW layers
@@ -273,7 +283,8 @@ class MultiLayerReranker(nn.Module):
 			# Create final result structure
 			result = {
 				"layer_data": layer_data,
-				"trajectories": trajectories
+				"trajectories": trajectories,
+				"is_query": is_query  # Store query/document flag at the top level too
 			}
 			results.append(result)
 
@@ -306,6 +317,10 @@ class MultiLayerReranker(nn.Module):
 		doc_token_ids = doc_layer["token_ids"]
 		doc_token_indices = doc_layer["token_indices"]
 
+		# Use is_query flags (default to True for query_layer, False for doc_layer)
+		is_query_query = query_layer.get("is_query", True)
+		is_query_doc = doc_layer.get("is_query", False)
+
 		# Handle empty embeddings case
 		if len(query_embeddings) == 0 or len(doc_embeddings) == 0:
 			return torch.tensor(0.0, device=self.device)
@@ -334,7 +349,8 @@ class MultiLayerReranker(nn.Module):
 		query_weights = layer_weighter(
 			query_tokens, 
 			query_token_indices,
-			token_ids=query_token_ids
+			token_ids=query_token_ids,
+			is_query=is_query_query
 		)
 
 		# Get weights for the corresponding document tokens
@@ -348,11 +364,17 @@ class MultiLayerReranker(nn.Module):
 		doc_weights = layer_weighter(
 			best_doc_tokens,
 			best_doc_indices,
-			token_ids=best_doc_token_ids
+			token_ids=best_doc_token_ids,
+			is_query=is_query_doc
 		)
 
-		# Combine query and document weights (multiply)
-		combined_weights = query_weights * doc_weights
+		# Apply weighting scheme based on mode
+		if self.weighting_mode == "query_only":
+			combined_weights = query_weights
+		elif self.weighting_mode == "none":
+			combined_weights = torch.ones_like(query_weights) / len(query_weights)
+		else:  # "full"
+			combined_weights = query_weights * doc_weights
 
 		# Weight normalization
 		if self.weight_normalization == "linear":
@@ -387,6 +409,10 @@ class MultiLayerReranker(nn.Module):
 		"""
 		query_trajectories = query_data["trajectories"]
 		doc_trajectories = doc_data["trajectories"]
+
+		# Use is_query flags
+		is_query_query = query_data.get("is_query", True)
+		is_query_doc = doc_data.get("is_query", False)
 
 		# Handle empty trajectories case
 		if not query_trajectories or not doc_trajectories:
@@ -520,14 +546,16 @@ class MultiLayerReranker(nn.Module):
 				q_weight = self.dtw_weighter(
 					[query_token],
 					[query_first_layer["token_indices"][query_pos]],
-					token_ids=[query_token_id]
+					token_ids=[query_token_id],
+					is_query=is_query_query
 				)
 
 				d_traj_idx, doc_token, doc_token_id, doc_pos = best_candidate
 				d_weight = self.dtw_weighter(
 					[doc_token],
 					[doc_first_layer["token_indices"][doc_pos]],
-					token_ids=[doc_token_id]
+					token_ids=[doc_token_id],
+					is_query=is_query_doc
 				)
 
 				query_weights.append(q_weight)
@@ -542,8 +570,13 @@ class MultiLayerReranker(nn.Module):
 		query_weights = torch.cat(query_weights)
 		doc_weights = torch.cat(doc_weights)
 
-		# Combine query and document weights
-		combined_weights = query_weights * doc_weights
+		# Apply weighting mode
+		if self.weighting_mode == "query_only":
+			combined_weights = query_weights
+		elif self.weighting_mode == "none":
+			combined_weights = torch.ones_like(query_weights) / len(query_weights)
+		else:  # "full"
+			combined_weights = query_weights * doc_weights
 
 		# Apply weight normalization
 		if self.weight_normalization == "linear":
@@ -569,7 +602,7 @@ class MultiLayerReranker(nn.Module):
 
 		Args:
 			batch_query_data: List of dictionaries with query embeddings
-			batch_doc_data: List of dictionaries with document embeddings
+			batch_doc_ionaries with document embeddings
 			layer_idx: Which layer to use for similarity calculation
 
 		Returns:
@@ -611,17 +644,23 @@ class MultiLayerReranker(nn.Module):
 			all_query_lengths.append(len(query_layer["embeddings"]))
 			all_doc_lengths.append(len(doc_layer["embeddings"]))
 
+			# Get is_query flag
+			is_query_query = query_data.get("is_query", True)  # Default True for query
+			is_query_doc = doc_data.get("is_query", False)     # Default False for doc
+
 			# Collect metadata for token weighting
 			query_metadata.append({
 				"tokens": query_layer["tokens"],
 				"token_ids": query_layer["token_ids"],
-				"token_indices": query_layer["token_indices"]
+				"token_indices": query_layer["token_indices"],
+				"is_query": is_query_query
 			})
 
 			doc_metadata.append({
 				"tokens": doc_layer["tokens"],
 				"token_ids": doc_layer["token_ids"],
-				"token_indices": doc_layer["token_indices"]
+				"token_indices": doc_layer["token_indices"],
+				"is_query": is_query_doc
 			})
 
 		# Initialize result tensor
@@ -660,7 +699,8 @@ class MultiLayerReranker(nn.Module):
 				query_weights = layer_weighter(
 					query_meta["tokens"],
 					query_meta["token_indices"],
-					token_ids=query_meta["token_ids"]
+					token_ids=query_meta["token_ids"],
+					is_query=query_meta["is_query"]
 				)
 
 				# Find the best matching document tokens
@@ -675,11 +715,17 @@ class MultiLayerReranker(nn.Module):
 				doc_weights = layer_weighter(
 					best_doc_tokens,
 					best_doc_indices,
-					token_ids=best_doc_token_ids
+					token_ids=best_doc_token_ids,
+					is_query=doc_meta["is_query"]
 				)
 
-				# Combine weights
-				combined_weights = query_weights * doc_weights
+				# Apply weighting mode
+				if self.weighting_mode == "query_only":
+					combined_weights = query_weights
+				elif self.weighting_mode == "none":
+					combined_weights = torch.ones_like(query_weights) / len(query_weights)
+				else:  # "full"
+					combined_weights = query_weights * doc_weights
 
 				# Normalize weights
 				if self.weight_normalization == "linear":
@@ -706,7 +752,7 @@ class MultiLayerReranker(nn.Module):
 		Optimized to process multiple pairs in parallel.
 
 		Args:
-			batch_query_ionaries with query trajectories
+			batch_query_data: List of dictionaries with query trajectories
 			batch_doc_data: List of dictionaries with document trajectories
 			top_k: Number of top candidates to consider for each query token
 
@@ -723,6 +769,10 @@ class MultiLayerReranker(nn.Module):
 
 			query_trajectories = query_data["trajectories"]
 			doc_trajectories = doc_data["trajectories"]
+
+			# Get is_query flags
+			is_query_query = query_data.get("is_query", True)  # Default True for query
+			is_query_doc = doc_data.get("is_query", False)     # Default False for doc
 
 			# Handle empty trajectories case
 			if not query_trajectories or not doc_trajectories:
@@ -852,13 +902,15 @@ class MultiLayerReranker(nn.Module):
 				q_weight = self.dtw_weighter(
 					[all_query_tokens[q_idx]],
 					[query_first_layer["token_indices"][all_query_positions[q_idx]]],
-					token_ids=[all_query_token_ids[q_idx]]
+					token_ids=[all_query_token_ids[q_idx]],
+					is_query=is_query_query
 				)
 
 				d_weight = self.dtw_weighter(
 					[best_candidate["token"]],
 					[doc_first_layer["token_indices"][best_candidate["pos"]]],
-					token_ids=[best_candidate["token_id"]]
+					token_ids=[best_candidate["token_id"]],
+					is_query=is_query_doc
 				)
 
 				query_weights.append(q_weight)
@@ -874,8 +926,13 @@ class MultiLayerReranker(nn.Module):
 			query_weights_tensor = torch.cat(query_weights)
 			doc_weights_tensor = torch.cat(doc_weights)
 
-			# Combine weights
-			combined_weights = query_weights_tensor * doc_weights_tensor
+			# Apply weighting mode
+			if self.weighting_mode == "query_only":
+				combined_weights = query_weights_tensor
+			elif self.weighting_mode == "none":
+				combined_weights = torch.ones_like(query_weights_tensor) / len(query_weights_tensor)
+			else:  # "full"
+				combined_weights = query_weights_tensor * doc_weights_tensor
 
 			# Normalize weights
 			if self.weight_normalization == "linear":
@@ -899,7 +956,7 @@ class MultiLayerReranker(nn.Module):
 
 		Args:
 			query_data: Output from encode_multi_layer for query
-			doc_data: Output from encode_multi_layer for document
+			doc_ document
 			model_type: "all", "layer_{idx}", or "dtw"
 
 		Returns:
@@ -1008,8 +1065,8 @@ class MultiLayerReranker(nn.Module):
 		if not self._is_loaded:
 			raise RuntimeError("Model not loaded. Call load_model() first.")
 
-		# Encode query (extract all layers at once)
-		query_data = self.encode_multi_layer(query)
+		# Encode query (extract all layers at once) - mark as query
+		query_data = self.encode_multi_layer(query, is_query=True)
 
 		# Initialize results dictionary
 		if model_type == "all":
@@ -1024,8 +1081,8 @@ class MultiLayerReranker(nn.Module):
 		for i in range(0, len(documents), batch_size):
 			batch_docs = documents[i:i+batch_size]
 
-			# Encode batch of documents
-			doc_data_list = self.encode_multi_layer(batch_docs)
+			# Encode batch of documents - mark as documents (not queries)
+			doc_data_list = self.encode_multi_layer(batch_docs, is_query=False)
 
 			# Process each document in the batch
 			for j, doc_data in enumerate(doc_data_list):
