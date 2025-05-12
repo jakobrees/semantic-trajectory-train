@@ -1,1 +1,0 @@
-python run_training.py   --model_name meta-llama/Llama-2-7b-hf   --layers 0,3,6,9,12,15,18,21   --dtw_layers 6,9,12,15   --batch_size 64   --gradient_accumulation_steps 4   --learning_rate 1e-4   --weight_decay 1e-5   --steps 1000   --eval_steps 50   --save_steps 50   --output_dir /home/ubuntu/a100-storage/projects/semantic-trajectory/model_checkpoints
