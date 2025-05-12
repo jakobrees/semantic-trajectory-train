@@ -153,7 +153,7 @@ class MultiLayerReranker(nn.Module):
 		Args:
 			texts: Single text or list of texts to encode
 			remove_special_tokens: Whether to remove special tokens from outputs
-			is_query: Whether the texts are queries (True) or documents (False)
+			is_query: Whether the texts are queries or documents
 
 		Returns:
 			Dict with layer_data containing embeddings and token info for each layer
@@ -253,32 +253,35 @@ class MultiLayerReranker(nn.Module):
 					"is_query": is_query  # Store query/document flag
 				}
 
-			# Extract token trajectories for DTW layers
+			# Extract token trajectories for DTW layers only if we have DTW layers specified
 			trajectories = {}
-			for token_idx in range(len(layer_data[self.dtw_layer_indices[0]]["tokens"])):
-				token = layer_data[self.dtw_layer_indices[0]]["tokens"][token_idx]
-				token_id = layer_data[self.dtw_layer_indices[0]]["token_ids"][token_idx]
+			if self.dtw_layer_indices:  # Only process if there are DTW layers
+				first_layer = self.dtw_layer_indices[0]
+				if first_layer in layer_data:  # Make sure the first DTW layer is in layer_data
+					for token_idx in range(len(layer_data[first_layer]["tokens"])):
+						token = layer_data[first_layer]["tokens"][token_idx]
+						token_id = layer_data[first_layer]["token_ids"][token_idx]
 
-				# Extract embedding trajectory across layers
-				trajectory = []
-				for layer_idx in self.dtw_layer_indices:
-					# Find matching token position in each layer
-					token_pos = None
-					for i, tid in enumerate(layer_data[layer_idx]["token_ids"]):
-						if tid == token_id:
-							token_pos = i
-							break
+						# Extract embedding trajectory across layers
+						trajectory = []
+						for layer_idx in self.dtw_layer_indices:
+							# Find matching token position in each layer
+							token_pos = None
+							for i, tid in enumerate(layer_data[layer_idx]["token_ids"]):
+								if tid == token_id:
+									token_pos = i
+									break
 
-					if token_pos is not None:
-						trajectory.append(layer_data[layer_idx]["embeddings"][token_pos])
+							if token_pos is not None:
+								trajectory.append(layer_data[layer_idx]["embeddings"][token_pos])
 
-				if len(trajectory) == len(self.dtw_layer_indices):
-					# Only include complete trajectories
-					trajectories[token_idx] = {
-						"token": token,
-						"token_id": token_id,
-						"embeddings": torch.stack(trajectory)
-					}
+						if len(trajectory) == len(self.dtw_layer_indices):
+							# Only include complete trajectories
+							trajectories[token_idx] = {
+								"token": token,
+								"token_id": token_id,
+								"embeddings": torch.stack(trajectory)
+							}
 
 			# Create final result structure
 			result = {

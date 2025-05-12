@@ -246,7 +246,7 @@ class MSMARCOHardNegativeDataset(Dataset):
 		# Prepare the data
 		for qid in self.queries:
 			self.queries[qid]["pos"] = list(self.queries[qid]["pos"])
-			self.queries[qid]["harStream error: Response payload is not completed: <TransferEncodingError: 400, message='Not enough data for satisfy transfer length header.'>d_neg"] = list(self.queries[qid]["hard_neg"])
+			self.queries[qid]["hard_neg"] = list(self.queries[qid]["hard_neg"])
 			random.shuffle(self.queries[qid]["hard_neg"])
 
 	def __getitem__(self, idx):
@@ -324,10 +324,12 @@ def train_with_hard_negatives(
 	token_weight_type="log_weights",
 	token_fallback_weight=21.5481,
 	margin=0.05,
-	lambda_factor=0.1
+	lambda_factor=0.1,
+	weight_normalization="linear"  # Added parameter
 ):
 	"""Main training function for a fixed number of steps"""
 	logger.info("Starting training process...")
+	logger.info(f"Using weight_normalization={weight_normalization}")
 
 	# Setup output directories
 	os.makedirs(output_dir, exist_ok=True)
@@ -422,6 +424,7 @@ def train_with_hard_negatives(
 					layer_idx=layer_idx,
 					max_length=max_length,
 					token_weighter=token_weighter,  # May be None for token weighter
+					weight_normalization=weight_normalization,  # Pass weight normalization parameter
 					device=device
 				)
 
@@ -605,6 +608,7 @@ def train_with_hard_negatives(
 										"step": global_step,
 										"weighter_type": weighter_type,
 										"weighting_mode": weighting_mode,
+										"weight_normalization": weight_normalization,  # Add this field
 										"layer_idx": int(model_key.split("_")[1]),
 										"model_name": model_name,
 										"timestamp": datetime.now().isoformat()
@@ -651,6 +655,7 @@ def train_with_hard_negatives(
 						"step": global_step,
 						"weighter_type": weighter_type,
 						"weighting_mode": weighting_mode,
+						"weight_normalization": weight_normalization,  # Add this field
 						"layer_idx": int(model_key.split("_")[1]),
 						"model_name": model_name,
 						"timestamp": datetime.now().isoformat()
@@ -683,6 +688,11 @@ def main():
 					   default=["full", "query_only", "none"],
 					   choices=["full", "query_only", "none"],
 					   help="Weighting modes to train")
+
+	# New parameter for weight normalization
+	parser.add_argument("--weight_normalization", type=str, default="linear",
+					   choices=["linear", "softmax"],
+					   help="Weight normalization method to use")
 
 	# Training configuration
 	parser.add_argument("--data_path", type=str, default="./datasets/msmarco",
@@ -759,7 +769,8 @@ def main():
 		token_weight_type=args.token_weight_type,
 		token_fallback_weight=args.token_fallback_weight,
 		margin=args.margin,
-		lambda_factor=args.lambda_factor
+		lambda_factor=args.lambda_factor,
+		weight_normalization=args.weight_normalization  # Pass the parameter
 	)
 
 if __name__ == "__main__":

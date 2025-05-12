@@ -1,5 +1,5 @@
 #!/bin/bash
-# train_rerankers.sh - Comprehensive training script for MultiLayerReranker
+# train_rerankers.sh
 
 # Default parameters
 MODEL_NAME="meta-llama/Llama-2-7b-hf"
@@ -16,6 +16,7 @@ MAX_STEPS=500
 SAVE_STEPS=25
 EVAL_STEPS=2
 MAX_LENGTH=512
+MAX_LAYERS_PER_BATCH=4  # Process this many layers at once to avoid OOM
 OUTPUT_DIR="./model_checkpoints/msmarco_rerankers"
 TOKEN_WEIGHTS_FILE="token_frequency_data/llama2_token_freq_weights.pkl"
 TOKEN_WEIGHT_TYPE="log_weights"
@@ -82,6 +83,10 @@ while [[ $# -gt 0 ]]; do
             MAX_LENGTH="$2"
             shift 2
             ;;
+        --max_layers_per_batch)
+            MAX_LAYERS_PER_BATCH="$2"
+            shift 2
+            ;;
         --output_dir)
             OUTPUT_DIR="$2"
             shift 2
@@ -115,10 +120,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --gradient_accumulation_steps N  Gradient accumulation steps (default: 4)"
             echo "  --learning_rate RATE             Learning rate (default: 1e-4)"
             echo "  --weight_decay VALUE             Weight decay (default: 0.01)"
-            echo "  --max_steps STEPS                Maximum training steps (default: 5000)"
-            echo "  --save_steps STEPS               Save checkpoint every N steps (default: 1000)"
-            echo "  --eval_steps STEPS               Evaluate every N steps (default: 200)"
-            echo "  --max_length LENGTH              Maximum sequence length (default: 350)"
+            echo "  --max_steps STEPS                Maximum training steps (default: 500)"
+            echo "  --save_steps STEPS               Save checkpoint every N steps (default: 25)"
+            echo "  --eval_steps STEPS               Evaluate every N steps (default: 2)"
+            echo "  --max_length LENGTH              Maximum sequence length (default: 512)"
+            echo "  --max_layers_per_batch N         Maximum layers to process at once (default: 4)"
             echo "  --output_dir DIR                 Output directory (default: ./model_checkpoints/msmarco_rerankers)"
             echo "  --token_weights_file FILE        Path to token weights file (default: token_frequency_data/llama2_token_freq_weights.pkl)"
             echo "  --token_weight_type TYPE         Token weight type: log_weights or reciprocal_weights (default: log_weights)"
@@ -151,6 +157,7 @@ echo "Max steps: $MAX_STEPS"
 echo "Save steps: $SAVE_STEPS"
 echo "Eval steps: $EVAL_STEPS"
 echo "Max length: $MAX_LENGTH"
+echo "Max layers per batch: $MAX_LAYERS_PER_BATCH"
 echo "Output directory: $OUTPUT_DIR"
 echo "Token weights file: $TOKEN_WEIGHTS_FILE"
 echo "Token weight type: $TOKEN_WEIGHT_TYPE"
@@ -189,7 +196,7 @@ echo "Logging to: $LOG_FILE"
 {
     echo "Starting training at $(date)"
     echo "Command:"
-    echo "python train_simple_weighters.py \
+    echo "python shared_model_trainer.py \
       --model_name $MODEL_NAME \
       --layer_indices $LAYER_ARGS \
       --weighter_types $WEIGHTER_ARGS \
@@ -203,6 +210,7 @@ echo "Logging to: $LOG_FILE"
       --save_steps $SAVE_STEPS \
       --evaluation_steps $EVAL_STEPS \
       --max_length $MAX_LENGTH \
+      --max_layers_per_batch $MAX_LAYERS_PER_BATCH \
       --output_dir $OUTPUT_DIR \
       --token_weights_filepath $TOKEN_WEIGHTS_FILE \
       --token_weight_type $TOKEN_WEIGHT_TYPE \
@@ -211,7 +219,7 @@ echo "Logging to: $LOG_FILE"
       --weight_normalization $WEIGHT_NORMALIZATION"
 
     # Execute the command
-    python train_simple_weighters.py \
+    python shared_model_trainer.py \
       --model_name "$MODEL_NAME" \
       --layer_indices $LAYER_ARGS \
       --weighter_types $WEIGHTER_ARGS \
@@ -225,6 +233,7 @@ echo "Logging to: $LOG_FILE"
       --save_steps "$SAVE_STEPS" \
       --evaluation_steps "$EVAL_STEPS" \
       --max_length "$MAX_LENGTH" \
+      --max_layers_per_batch "$MAX_LAYERS_PER_BATCH" \
       --output_dir "$OUTPUT_DIR" \
       --token_weights_filepath "$TOKEN_WEIGHTS_FILE" \
       --token_weight_type "$TOKEN_WEIGHT_TYPE" \

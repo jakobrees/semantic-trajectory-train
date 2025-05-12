@@ -475,41 +475,36 @@ class LlamaReranker(nn.Module):
 		gc.collect()
 		logger.info("Model unloaded successfully.")
 
-	def encode(self, texts, remove_special_tokens=True):
+	def encode(self, text, remove_special_tokens=True, is_query=False):
 		"""
-		Encode texts and extract embeddings from the specified layer.
-		Optimized for batch processing.
+		Encode text and extract embeddings from the specified layer.
 
 		Args:
-			texts: Single text or list of texts to encode
+			text: Text to encode
 			remove_special_tokens: Whether to remove special tokens from outputs
+			is_query: Whether this text is a query (True) or document (False)
 
 		Returns:
-			Dict with embeddings, tokens, and token info for each text
+			Dictionary with embeddings, tokens, and token info
 		"""
 		if not self._is_loaded:
 			raise RuntimeError("Model not loaded. Call load_model() first.")
 
-		# Handle single text input
-		is_single_text = isinstance(texts, str)
-		if is_single_text:
-			texts = [texts]
-
-		# Tokenize inputs
-		batch_encoding = self.tokenizer(
-			texts,
-			padding=True,
+		# Tokenize input
+		encoding = self.tokenizer(
+			text,
+			padding=False,
 			truncation=True,
 			max_length=self.max_length,
 			return_tensors="pt"
 		)
 
 		# Move to appropriate device
-		batch_encoding = {k: v.to(self.device) for k, v in batch_encoding.items()}
+		encoding = {k: v.to(self.device) for k, v in encoding.items()}
 
 		# Forward pass to get embeddings and hidden states
 		with torch.no_grad():
-			outputs = self.model(**batch_encoding, return_dict=True)
+			outputs = self.model(**encoding, return_dict=True)
 
 		# Extract hidden states from the specified layer
 		hidden_states = outputs.hidden_states[self.layer_idx]
@@ -517,84 +512,70 @@ class LlamaReranker(nn.Module):
 		# Get logits if available (for token probabilities)
 		logits = getattr(outputs, 'logits', None)
 
-		# Create results container
-		results = []
+		# Get token IDs and attention mask for actual sequence length
+		attention_mask = encoding["attention_mask"][0]
+		seq_length = attention_mask.sum().item()
+		token_ids = encoding["input_ids"][0][:seq_length].tolist()
 
-		# Process each text in the batch
-		for batch_idx, text in enumerate(texts):
-			# Get attention mask for actual tokens (excluding padding)
-			attention_mask = batch_encoding["attention_mask"][batch_idx]
-			seq_length = attention_mask.sum().item()
+		# Get token strings
+		tokens = self.tokenizer.convert_ids_to_tokens(token_ids)
 
-			# Get token IDs
-			token_ids = batch_encoding["input_ids"][batch_idx][:seq_length].tolist()
+		# Get embeddings for this sequence
+		text_embeddings = hidden_states[0, :seq_length].clone()
 
-			# Get token strings
-			tokens = self.tokenizer.convert_ids_to_tokens(token_ids)
+		# Calculate token probabilities if available
+		token_probs = [None] * seq_length
+		if logits is not None:
+			batch_logits = logits[0, :seq_length-1]
+			if batch_logits.size(-1) == len(self.tokenizer):
+				batch_probs = F.softmax(batch_logits, dim=-1)
+				for pos in range(seq_length - 1):
+					next_token_id = token_ids[pos + 1]
+					token_probs[pos+1] = batch_probs[pos, next_token_id].item()
 
-			# Get embeddings for this sequence
-			text_embeddings = hidden_states[batch_idx, :seq_length].clone()
+		# Normalize embeddings if requested
+		if self.normalize_embeddings:
+			text_embeddings = F.normalize(text_embeddings, p=2, dim=1)
 
-			# Calculate token probabilities if available
-			token_probs = [None] * seq_length
-			if logits is not None and batch_idx < logits.size(0):
-				batch_logits = logits[batch_idx, :seq_length-1]
-
-				if batch_logits.size(-1) == len(self.tokenizer):
-					batch_probs = F.softmax(batch_logits, dim=-1)
-
-					for pos in range(seq_length - 1):
-						next_token_id = token_ids[pos + 1]
-						token_probs[pos+1] = batch_probs[pos, next_token_id].item()
-
-			# Normalize embeddings if requested
-			if self.normalize_embeddings:
-				text_embeddings = F.normalize(text_embeddings, p=2, dim=1)
-
-			# Filter out special tokens if requested
-			if remove_special_tokens:
-				special_tokens = set(self.tokenizer.all_special_tokens)
-				keep_mask = [token not in special_tokens for token in tokens]
-
-				if not any(keep_mask):
-					# Handle edge case of all special tokens
-					filtered_embeddings = text_embeddings.new_zeros((0, text_embeddings.size(1)))
-					filtered_tokens = []
-					filtered_token_ids = []
-					filtered_token_probs = []
-					filtered_token_indices = []
-				else:
-					# Get indices of tokens to keep
-					keep_indices = [i for i, keep in enumerate(keep_mask) if keep]
-
-					# Use index_select for GPU efficiency
-					select_indices = torch.tensor(keep_indices, device=text_embeddings.device)
-					filtered_embeddings = torch.index_select(text_embeddings, 0, select_indices)
-					filtered_tokens = [tokens[i] for i in keep_indices]
-					filtered_token_ids = [token_ids[i] for i in keep_indices]
-					filtered_token_probs = [token_probs[i] for i in keep_indices]
-					filtered_token_indices = keep_indices
+		# Filter out special tokens if requested
+		if remove_special_tokens:
+			special_tokens = set(self.tokenizer.all_special_tokens)
+			keep_mask = [token not in special_tokens for token in tokens]
+			if not any(keep_mask):
+				# Handle edge case of all special tokens
+				filtered_embeddings = text_embeddings.new_zeros((0, text_embeddings.size(1)))
+				filtered_tokens = []
+				filtered_token_ids = []
+				filtered_token_probs = []
+				filtered_token_indices = []
 			else:
-				filtered_embeddings = text_embeddings
-				filtered_tokens = tokens
-				filtered_token_ids = token_ids
-				filtered_token_probs = token_probs
-				filtered_token_indices = list(range(seq_length))
+				# Get indices of tokens to keep
+				keep_indices = [i for i, keep in enumerate(keep_mask) if keep]
+				# Use index_select for GPU efficiency
+				select_indices = torch.tensor(keep_indices, device=text_embeddings.device)
+				filtered_embeddings = torch.index_select(text_embeddings, 0, select_indices)
+				filtered_tokens = [tokens[i] for i in keep_indices]
+				filtered_token_ids = [token_ids[i] for i in keep_indices]
+				filtered_token_probs = [token_probs[i] for i in keep_indices]
+				filtered_token_indices = keep_indices
+		else:
+			filtered_embeddings = text_embeddings
+			filtered_tokens = tokens
+			filtered_token_ids = token_ids
+			filtered_token_probs = token_probs
+			filtered_token_indices = list(range(seq_length))
 
-			# Add results for this text
-			results.append({
-				"embeddings": filtered_embeddings,
-				"tokens": filtered_tokens,
-				"token_ids": filtered_token_ids,
-				"token_indices": filtered_token_indices,
-				"token_probs": filtered_token_probs
-			})
+		# Create result dictionary
+		result = {
+			"embeddings": filtered_embeddings,
+			"tokens": filtered_tokens,
+			"token_ids": filtered_token_ids,
+			"token_indices": filtered_token_indices,
+			"token_probs": filtered_token_probs,
+			"is_query": is_query  # Store the is_query flag
+		}
 
-		# Return single result for single input
-		if is_single_text:
-			return results[0]
-
-		return results
+		return result
 
 	def batch_encode(self, texts, batch_size=16, remove_special_tokens=True):
 		"""
