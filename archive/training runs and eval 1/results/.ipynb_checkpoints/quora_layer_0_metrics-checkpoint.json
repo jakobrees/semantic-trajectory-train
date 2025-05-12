@@ -1,0 +1,8 @@
+{
+  "config": {
+    "model_type": "layer_0",
+    "weighter_step": 1000,
+    "queries_evaluated": 2
+  },
+  "metrics": {}
+}

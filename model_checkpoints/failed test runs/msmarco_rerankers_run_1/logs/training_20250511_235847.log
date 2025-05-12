@@ -1,0 +1,29 @@
+Starting training at Sun May 11 23:58:47 UTC 2025
+Command:
+python shared_model_trainer.py       --model_name meta-llama/Llama-2-7b-hf       --layer_indices  0 3 6 9 12 15 18 21       --weighter_types  token positional surprise       --weighting_modes  full query_only none       --data_path ./datasets/msmarco       --batch_size 16       --gradient_accumulation_steps 4       --learning_rate 1e-4       --weight_decay 0.01       --max_steps 500       --save_steps 25       --evaluation_steps 2       --max_length 512       --max_layers_per_batch 10       --output_dir ./model_checkpoints/msmarco_rerankers       --token_weights_filepath token_frequency_data/llama2_token_freq_weights.pkl       --token_weight_type log_weights       --margin 0.05       --lambda_factor 0.1       --weight_normalization linear
+usage: shared_model_trainer.py [-h] [--model_name MODEL_NAME]
+                               [--layer_indices LAYER_INDICES [LAYER_INDICES ...]]
+                               --weighter_type {token,positional,surprise}
+                               --weighting_mode {full,query_only,none}
+                               [--weight_normalization {linear,softmax}]
+                               [--data_path DATA_PATH]
+                               [--batch_size BATCH_SIZE]
+                               [--gradient_accumulation_steps GRADIENT_ACCUMULATION_STEPS]
+                               [--learning_rate LEARNING_RATE]
+                               [--weight_decay WEIGHT_DECAY]
+                               [--max_steps MAX_STEPS]
+                               [--save_steps SAVE_STEPS]
+                               [--evaluation_steps EVALUATION_STEPS]
+                               [--ce_score_margin CE_SCORE_MARGIN]
+                               [--num_negs_per_system NUM_NEGS_PER_SYSTEM]
+                               [--token_weights_filepath TOKEN_WEIGHTS_FILEPATH]
+                               [--token_weight_type {log_weights,reciprocal_weights}]
+                               [--token_fallback_weight TOKEN_FALLBACK_WEIGHT]
+                               [--margin MARGIN]
+                               [--lambda_factor LAMBDA_FACTOR]
+                               [--max_layers_per_batch MAX_LAYERS_PER_BATCH]
+                               [--max_length MAX_LENGTH]
+                               [--output_dir OUTPUT_DIR]
+shared_model_trainer.py: error: the following arguments are required: --weighter_type, --weighting_mode
+Initializing efficient training script...
+Training completed at Sun May 11 23:58:50 UTC 2025

@@ -1,0 +1,16 @@
+{
+  "step": 110,
+  "timestamp": 1746996849.4490001,
+  "model_name": "meta-llama/Llama-2-7b-hf",
+  "dtw_layers": [
+    6,
+    9,
+    12,
+    15
+  ],
+  "layer_type": "dtw",
+  "normalize_embeddings": true,
+  "similarity_fn": "cosine",
+  "weight_normalization": "softmax",
+  "loss": 0.0
+}

@@ -1,0 +1,9 @@
+{
+  "step": 325,
+  "weighter_type": "token",
+  "weighting_mode": "full",
+  "weight_normalization": "linear",
+  "layer_idx": 3,
+  "model_name": "meta-llama/Llama-2-7b-hf",
+  "timestamp": "2025-05-12T00:49:54.934913"
+}

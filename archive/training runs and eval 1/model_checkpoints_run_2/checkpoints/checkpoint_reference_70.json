@@ -1,0 +1,24 @@
+{
+  "step": 70,
+  "timestamp": 1746970239.1612394,
+  "available_models": {
+    "single_layers": [
+      0,
+      3,
+      6,
+      9,
+      12,
+      15,
+      18,
+      21
+    ],
+    "dtw": {
+      "using_layers": [
+        6,
+        9,
+        12,
+        15
+      ]
+    }
+  }
+}

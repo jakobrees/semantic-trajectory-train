@@ -1,0 +1,10 @@
+{
+  "layer_idx": 18,
+  "step": 100,
+  "timestamp": 1746970514.7622604,
+  "model_name": "meta-llama/Llama-2-7b-hf",
+  "layer_type": "single",
+  "normalize_embeddings": true,
+  "similarity_fn": "cosine",
+  "weight_normalization": "linear"
+}
