@@ -1,2 +1,5 @@
 results/quora_bm25_index.pkl
 results/quora_bm25_results.tsv
+results/*.tsv
+results/*.pkl
+archive/*.log
